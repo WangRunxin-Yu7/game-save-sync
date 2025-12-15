@@ -1,17 +1,11 @@
 """
-日志工具实现
-- 自动初始化：读取日志配置，创建目录，并清理多余日志文件
-- 简单接口：log(template, **kwargs) 使用 str.format 写入一条日志
-- 每条日志包含时间戳与格式化内容
+日志记录器类
 """
 from datetime import datetime
 from pathlib import Path
 import threading
 from typing import Optional
-from config_util import get_logging
 
-_LOGGER = None
-_LOCK = threading.Lock()
 
 class Logger:
     """
@@ -43,8 +37,9 @@ class Logger:
     def _cleanup_excess_logs(self):
         """
         清理多余日志文件，保留最新的 max_logs 个 .log 文件
+        使用文件名排序（日期格式可排序）
         """
-        files = sorted(self.log_dir.glob("*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+        files = sorted(self.log_dir.glob("*.log"), key=lambda p: p.name, reverse=True)
         if self.max_logs is None or self.max_logs <= 0:
             return
         for p in files[self.max_logs:]:
@@ -65,40 +60,3 @@ class Logger:
             path.parent.mkdir(parents=True, exist_ok=True)
             with path.open("a", encoding="utf-8") as f:
                 f.write(line)
-
-def _init():
-    global _LOGGER
-    with _LOCK:
-        if _LOGGER is None:
-            cfg = get_logging()
-            _LOGGER = Logger(log_dir=cfg.get("log_dir", "./logs"), max_logs=cfg.get("max_logs", 1000))
-
-def reload_logger():
-    """
-    重新加载日志配置并重建日志器（下次写入按新配置）
-    """
-    global _LOGGER
-    with _LOCK:
-        cfg = get_logging()
-        _LOGGER = Logger(log_dir=cfg.get("log_dir", "./logs"), max_logs=cfg.get("max_logs", 1000))
-
-def _ensure():
-    if _LOGGER is None:
-        _init()
-
-def log(template: str, **kwargs):
-    """
-    简单外部接口：
-    - 传入字符串与参数，按 str.format(**kwargs) 格式化
-    - 写入一条包含时间戳的日志
-    """
-    _ensure()
-    msg = template
-    if kwargs:
-        try:
-            msg = template.format(**kwargs)
-        except Exception:
-            # 若格式化失败，附加原始参数
-            msg = f"{template} | {kwargs}"
-    _LOGGER.write(msg)
-

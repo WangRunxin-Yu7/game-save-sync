@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Dict, List
 from .models import GameEntry
 
-class Config:
+
+class ConfigLoader:
     """
     封装对 INI 配置的读取与解析
     """

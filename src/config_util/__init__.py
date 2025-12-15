@@ -1,2 +1,28 @@
-from .config import get_general, get_git, get_sync, get_backup, get_logging, get_games, get_value, reload_config
+"""
+配置工具模块
+"""
+from .models import GameEntry
+from .config_loader import ConfigLoader
+from .config_manager import (
+    get_value,
+    get_general,
+    get_git,
+    get_sync,
+    get_backup,
+    get_logging,
+    get_games,
+    reload_config
+)
 
+__all__ = [
+    "GameEntry",
+    "ConfigLoader",
+    "get_value",
+    "get_general",
+    "get_git",
+    "get_sync",
+    "get_backup",
+    "get_logging",
+    "get_games",
+    "reload_config"
+]

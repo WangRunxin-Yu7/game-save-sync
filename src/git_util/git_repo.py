@@ -1,54 +1,14 @@
 """
-最小 Git 封装（基于 git CLI）
-- 目标：静默运行、可并发调用、接口简洁
-- 功能：clone / force_pull / force_push / add / commit
+Git 仓库封装类
 """
 from __future__ import annotations
-import subprocess
-import shlex
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Tuple
 import threading
 from log_util import log
+from .git_helpers import run_git_command, redact_token
 
-def _redact(s: str, token: Optional[str]) -> str:
-    if token:
-        return s.replace(token, "***")
-    return s
-
-def _run(cmd: List[str], cwd: Path, token: Optional[str] = None) -> Tuple[int, str, str]:
-    """
-    运行 git 命令，返回 (code, stdout, stderr)，禁用交互
-    """
-    env = {
-        **os.environ,
-        "GIT_TERMINAL_PROMPT": "0",
-        "GCM_INTERACTIVE": "Never",
-        "GIT_ASKPASS": "echo",
-    }
-    try:
-        p = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            env=env,
-            creationflags=(0x08000000 if os.name == "nt" else 0),
-            encoding="utf-8",
-            errors="replace",
-            check=False,
-        )
-        cmd_str = " ".join(shlex.quote(x) for x in cmd)
-        log("git_run: cwd={cwd} cmd={cmd} code={code}", cwd=str(cwd), cmd=_redact(cmd_str, token), code=p.returncode)
-        out = p.stdout or ""
-        err = p.stderr or ""
-        return p.returncode, out, err
-    except Exception as e:
-        cmd_str = " ".join(shlex.quote(x) for x in cmd)
-        log("git_run_error: cwd={cwd} cmd={cmd} err={err}", cwd=str(cwd), cmd=_redact(cmd_str, token), err=str(e))
-        return 1, "", str(e)
 
 @dataclass
 class GitRepo:
@@ -68,7 +28,7 @@ class GitRepo:
     _lock: threading.Lock
 
     def _git(self, *args: str) -> Tuple[int, str, str]:
-        return _run(["git", *args], cwd=self.repo_dir, token=self.token)
+        return run_git_command(["git", *args], cwd=self.repo_dir, token=self.token)
 
     def _ensure_repo_dir(self):
         self.repo_dir.mkdir(parents=True, exist_ok=True)
@@ -117,17 +77,17 @@ class GitRepo:
                                 self.repo_dir.rmdir()
                         except Exception:
                             pass
-                        code, _, err = _run(["git", "clone", "--quiet", url, str(self.repo_dir)], cwd=self.repo_dir.parent, token=self.token)
+                        code, _, err = run_git_command(["git", "clone", "--quiet", url, str(self.repo_dir)], cwd=self.repo_dir.parent, token=self.token)
                     else:
                         code, _, err = (1, "", "destination not empty")
                     if code != 0:
-                        log("git_clone_fail: path={path} err={err}", path=str(self.repo_dir), err=_redact(err.strip(), self.token))
+                        log("git_clone_fail: path={path} err={err}", path=str(self.repo_dir), err=redact_token(err.strip(), self.token))
                         return False
                     log("git_clone_ok: path={path} branch={branch}", path=str(self.repo_dir), branch=self.branch)
                 else:
                     code, _, err = self._git("init")
                     if code != 0:
-                        log("git_init_fail: path={path} err={err}", path=str(self.repo_dir), err=_redact(err.strip(), self.token))
+                        log("git_init_fail: path={path} err={err}", path=str(self.repo_dir), err=redact_token(err.strip(), self.token))
                         return False
                     log("git_init_ok: path={path}", path=str(self.repo_dir))
             # 写入/更新 origin
@@ -156,11 +116,11 @@ class GitRepo:
             self._ensure_repo_dir()
             code, _, err = self._git("fetch", "origin", self.branch, "--quiet")
             if code != 0:
-                log("git_pull_fail_fetch: path={path} err={err}", path=str(self.repo_dir), err=_redact(err.strip(), self.token))
+                log("git_pull_fail_fetch: path={path} err={err}", path=str(self.repo_dir), err=redact_token(err.strip(), self.token))
                 return False
             code, _, err = self._git("reset", "--hard", f"origin/{self.branch}")
             if code != 0:
-                log("git_pull_fail_reset: path={path} err={err}", path=str(self.repo_dir), err=_redact(err.strip(), self.token))
+                log("git_pull_fail_reset: path={path} err={err}", path=str(self.repo_dir), err=redact_token(err.strip(), self.token))
                 return False
             self._git("clean", "-fdx")
             log("git_pull_ok: path={path} branch={branch}", path=str(self.repo_dir), branch=self.branch)
@@ -197,7 +157,7 @@ class GitRepo:
             self._set_user()
             code, _, err = self._git("commit", "-m", message)
             if code != 0:
-                log("git_commit_fail: path={path} err={err}", path=str(self.repo_dir), err=_redact(err.strip(), self.token))
+                log("git_commit_fail: path={path} err={err}", path=str(self.repo_dir), err=redact_token(err.strip(), self.token))
                 return False
             log("git_commit_ok: path={path} msg={msg}", path=str(self.repo_dir), msg=message)
             return True
@@ -216,19 +176,7 @@ class GitRepo:
             self._git("branch", "--set-upstream-to", f"origin/{self.branch}", self.branch)
             code, _, err = self._git("push", "--force-with-lease", "origin", self.branch)
             if code != 0:
-                log("git_push_fail: path={path} err={err}", path=str(self.repo_dir), err=_redact(err.strip(), self.token))
+                log("git_push_fail: path={path} err={err}", path=str(self.repo_dir), err=redact_token(err.strip(), self.token))
                 return False
             log("git_push_ok: path={path} branch={branch}", path=str(self.repo_dir), branch=self.branch)
             return True
-
-def create_git(remote: str, repo_dir: str | Path, branch: str = "main", token: Optional[str] = None, username: Optional[str] = None) -> GitRepo:
-    """
-    创建 Git 实例并返回
-    - remote: 远端地址（可为空）
-    - repo_dir: 仓库目录
-    - branch: 分支名
-    - token: 可选令牌（仅用于构造远端地址，日志中会打码）
-    """
-    rp = Path(repo_dir).resolve()
-    log("git_instance_create: path={path} branch={branch} remote={remote}", path=str(rp), branch=branch, remote=_redact(remote, token or None))
-    return GitRepo(repo_dir=rp, remote=remote or "", branch=branch or "main", token=token, username=username, _lock=threading.Lock())

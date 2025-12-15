@@ -5,69 +5,19 @@
 """
 from __future__ import annotations
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 from datetime import datetime
 import threading
 import time
-import fnmatch
-import hashlib
 
 from log_util import log
 from config_util import get_git, get_backup, get_sync, get_games, get_general
 from git_util import create_git, GitRepo
 from file_util import ensure_dir
 from watcher_util import create_watcher, Watcher
-from task_util import create_queue, create_task, enqueue
+from task_util import create_queue, create_task, enqueue, TaskQueue
+from .helpers import copy_preserve_tree, filter_paths_by_patterns, compute_files_hash, get_timestamp
 
-def _ts() -> str:
-    return datetime.now().strftime("%Y%m%d_%H%M%S")
-
-def _copy_preserve_tree(files: List[Path], src_root: Path, dst_root: Path):
-    """
-    复制文件到目标根目录，保留相对目录结构，覆盖同名
-    """
-    import shutil
-    for fp in files:
-        rel = fp.resolve().relative_to(src_root.resolve())
-        target = dst_root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.copy2(fp.as_posix(), target.as_posix())
-        except Exception as e:
-            log("copy_preserve_error: {src} -> {dst} err={err}", src=str(fp), dst=str(target), err=str(e))
-
-def _filter_paths_by_patterns(root: Path, files: List[Path], allow: List[str], deny: List[str]) -> List[Path]:
-    """
-    使用 allow/deny 模式过滤文件列表；模式按相对路径匹配
-    """
-    rels = [(f, f.resolve().relative_to(root.resolve()).as_posix()) for f in files]
-    if allow:
-        allowed = [f for f, rel in rels if any(fnmatch.fnmatch(rel, pat) for pat in allow)]
-    else:
-        allowed = [f for f, _ in rels]
-    if deny:
-        result = [f for f in allowed if not any(fnmatch.fnmatch(f.resolve().relative_to(root.resolve()).as_posix(), pat) for pat in deny)]
-    else:
-        result = allowed
-    return result
-
-def _compute_files_hash(files: List[Path]) -> str:
-    """
-    计算文件列表的哈希值（基于文件路径、大小和修改时间）
-    用于快速判断存档文件是否发生变化
-    """
-    if not files:
-        return ""
-    hasher = hashlib.sha256()
-    for fp in sorted(files, key=lambda p: p.as_posix()):
-        try:
-            stat = fp.stat()
-            # 使用文件路径、大小和修改时间作为标识
-            info = f"{fp.as_posix()}:{stat.st_size}:{stat.st_mtime}".encode('utf-8')
-            hasher.update(info)
-        except Exception as e:
-            log("compute_hash_error: {path} err={err}", path=str(fp), err=str(e))
-    return hasher.hexdigest()
 
 class SyncApp:
     """
@@ -98,9 +48,9 @@ class SyncApp:
             username=self.git_cfg.get("username", ""),
         )
         # 任务队列（唯一任务只保留最新）
-        self.q_pull = create_queue("pull")
-        self.q_push = create_queue("push")
-        self.q_apply = create_queue("apply")
+        self.q_pull: TaskQueue = create_queue("pull")
+        self.q_push: TaskQueue = create_queue("push")
+        self.q_apply: TaskQueue = create_queue("apply")
         # 监控器
         self.watcher: Watcher | None = None
         # 定时器线程
@@ -147,7 +97,7 @@ class SyncApp:
         """
         将本地存档备份到 backup/[timestamp]/[游戏名]/[index]/
         """
-        ts_dir = ensure_dir(self.backup_dir / _ts())
+        ts_dir = ensure_dir(self.backup_dir / get_timestamp())
         for g in self.games:
             game_root = Path(g.path).resolve()
             if not game_root.exists():
@@ -155,9 +105,9 @@ class SyncApp:
                 continue
             files = list(game_root.rglob("*"))
             files = [f for f in files if f.is_file()]
-            files = _filter_paths_by_patterns(game_root, files, g.allow, g.deny)
+            files = filter_paths_by_patterns(game_root, files, g.allow, g.deny)
             dst_root = ensure_dir(ts_dir / g.name / g.index)
-            _copy_preserve_tree(files, game_root, dst_root)
+            copy_preserve_tree(files, game_root, dst_root)
             log("backup_game_done: game={name} index={index} count={count}", name=g.name, index=g.index, count=len(files))
         log("backup_done: ts_dir={dir}", dir=str(ts_dir))
 
@@ -195,9 +145,9 @@ class SyncApp:
                 log("sync_skip_missing_root: {path}", path=str(game_root))
                 continue
             files = [p for p in game_root.rglob("*") if p.is_file()]
-            files = _filter_paths_by_patterns(game_root, files, g.allow, g.deny)
+            files = filter_paths_by_patterns(game_root, files, g.allow, g.deny)
             dst_root = ensure_dir(self.repo_dir / g.name / g.index)
-            _copy_preserve_tree(files, game_root, dst_root)
+            copy_preserve_tree(files, game_root, dst_root)
             log("sync_copy_game_done: game={name} index={index} count={count}", name=g.name, index=g.index, count=len(files))
 
     def _enqueue_pull_apply(self):
@@ -264,17 +214,17 @@ class SyncApp:
         pending = {"changed": False}
         lock = threading.Lock()
         # 路径到配置映射
-        path_to_cfg: Dict[str, Tuple[Path, List[str], List[str], str, str]] = {}
+        path_to_cfg: Dict[str, Tuple[Path, list, list, str, str]] = {}
         for g in self.games:
             root = Path(g.path).resolve()
             path_to_cfg[root.as_posix()] = (root, g.allow, g.deny, g.name, g.index)
             # 初始化哈希值
             if root.exists():
                 files = [p for p in root.rglob("*") if p.is_file()]
-                files = _filter_paths_by_patterns(root, files, g.allow, g.deny)
-                self._save_files_hash[root.as_posix()] = _compute_files_hash(files)
+                files = filter_paths_by_patterns(root, files, g.allow, g.deny)
+                self._save_files_hash[root.as_posix()] = compute_files_hash(files)
         
-        def _cb(root: str, created: List[str], modified: List[str], deleted: List[str]):
+        def _cb(root: str, created: list, modified: list, deleted: list):
             with lock:
                 pending["changed"] = True
             log("watch_event_cb: root={root} c={c} m={m} d={d}", root=root, c=len(created), m=len(modified), d=len(deleted))
@@ -296,8 +246,8 @@ class SyncApp:
                         if not root.exists():
                             continue
                         files = [p for p in root.rglob("*") if p.is_file()]
-                        files = _filter_paths_by_patterns(root, files, allow, deny)
-                        current_hash = _compute_files_hash(files)
+                        files = filter_paths_by_patterns(root, files, allow, deny)
+                        current_hash = compute_files_hash(files)
                         old_hash = self._save_files_hash.get(key, "")
                         
                         if current_hash != old_hash:
@@ -305,7 +255,7 @@ class SyncApp:
                             self._save_files_hash[key] = current_hash
                             # 复制变更到 repository
                             dst_root = ensure_dir(self.repo_dir / name / index)
-                            _copy_preserve_tree(files, root, dst_root)
+                            copy_preserve_tree(files, root, dst_root)
                             log("watch_sync_copy_done: root={root} game={name} index={index} count={count} hash_changed=True", 
                                 root=str(root), name=name, index=index, count=len(files))
                         else:
@@ -321,4 +271,3 @@ class SyncApp:
             log("watch_debounce_stop")
         
         threading.Thread(target=_debounce_loop, name="WatchDebounce", daemon=True).start()
-

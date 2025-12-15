@@ -1,7 +1,7 @@
 """
-文件变化监控门面
-- 支持监控一个或多个目录
-- 提供暂停、启动、释放与动态增删目录
+目录监控工具模块
 """
-from .watcher import create_watcher, Watcher
+from .watcher import Watcher
+from .factory import create_watcher
 
+__all__ = ["Watcher", "create_watcher"]
