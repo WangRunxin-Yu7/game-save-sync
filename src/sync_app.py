@@ -10,6 +10,7 @@ from datetime import datetime
 import threading
 import time
 import fnmatch
+import hashlib
 
 from log_util import log
 from config_util import get_git, get_backup, get_sync, get_games, get_general
@@ -50,6 +51,24 @@ def _filter_paths_by_patterns(root: Path, files: List[Path], allow: List[str], d
         result = allowed
     return result
 
+def _compute_files_hash(files: List[Path]) -> str:
+    """
+    计算文件列表的哈希值（基于文件路径、大小和修改时间）
+    用于快速判断存档文件是否发生变化
+    """
+    if not files:
+        return ""
+    hasher = hashlib.sha256()
+    for fp in sorted(files, key=lambda p: p.as_posix()):
+        try:
+            stat = fp.stat()
+            # 使用文件路径、大小和修改时间作为标识
+            info = f"{fp.as_posix()}:{stat.st_size}:{stat.st_mtime}".encode('utf-8')
+            hasher.update(info)
+        except Exception as e:
+            log("compute_hash_error: {path} err={err}", path=str(fp), err=str(e))
+    return hasher.hexdigest()
+
 class SyncApp:
     """
     存档同步应用
@@ -87,6 +106,8 @@ class SyncApp:
         # 定时器线程
         self._timer_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
+        # 存档文件哈希值缓存（用于判断是否真正变化）
+        self._save_files_hash: Dict[str, str] = {}
         log("app_init_done")
 
     def start(self):
@@ -237,7 +258,7 @@ class SyncApp:
 
     def _start_watcher(self):
         """
-        监控所有配置的游戏目录；发生变化时复制到 repository 并推送
+        监控所有配置的游戏目录；发生变化时检查存档文件是否真正变化，变化才复制到 repository 并推送
         """
         debounce_ms = int(self.sync_cfg.get("debounce_ms", 1500))
         pending = {"changed": False}
@@ -247,12 +268,20 @@ class SyncApp:
         for g in self.games:
             root = Path(g.path).resolve()
             path_to_cfg[root.as_posix()] = (root, g.allow, g.deny, g.name, g.index)
+            # 初始化哈希值
+            if root.exists():
+                files = [p for p in root.rglob("*") if p.is_file()]
+                files = _filter_paths_by_patterns(root, files, g.allow, g.deny)
+                self._save_files_hash[root.as_posix()] = _compute_files_hash(files)
+        
         def _cb(root: str, created: List[str], modified: List[str], deleted: List[str]):
             with lock:
                 pending["changed"] = True
             log("watch_event_cb: root={root} c={c} m={m} d={d}", root=root, c=len(created), m=len(modified), d=len(deleted))
+        
         self.watcher = create_watcher([Path(g.path) for g in self.games], _cb, interval_ms=max(300, debounce_ms))
         self.watcher.start()
+        
         def _debounce_loop():
             log("watch_debounce_start: interval_ms={ms}", ms=debounce_ms)
             while not self._stop_event.is_set():
@@ -261,16 +290,35 @@ class SyncApp:
                     changed = pending["changed"]
                     pending["changed"] = False
                 if changed:
-                    # 复制变更到 repository 并推送
+                    # 检查存档文件是否真正变化
+                    actual_changed = False
                     for key, (root, allow, deny, name, index) in path_to_cfg.items():
                         if not root.exists():
                             continue
                         files = [p for p in root.rglob("*") if p.is_file()]
                         files = _filter_paths_by_patterns(root, files, allow, deny)
-                        dst_root = ensure_dir(self.repo_dir / name / index)
-                        _copy_preserve_tree(files, root, dst_root)
-                        log("watch_sync_copy_done: root={root} game={name} index={index} count={count}", root=str(root), name=name, index=index, count=len(files))
-                    self._enqueue_sync_local_to_repo_and_push()
+                        current_hash = _compute_files_hash(files)
+                        old_hash = self._save_files_hash.get(key, "")
+                        
+                        if current_hash != old_hash:
+                            actual_changed = True
+                            self._save_files_hash[key] = current_hash
+                            # 复制变更到 repository
+                            dst_root = ensure_dir(self.repo_dir / name / index)
+                            _copy_preserve_tree(files, root, dst_root)
+                            log("watch_sync_copy_done: root={root} game={name} index={index} count={count} hash_changed=True", 
+                                root=str(root), name=name, index=index, count=len(files))
+                        else:
+                            log("watch_skip_no_change: root={root} game={name} index={index} hash_unchanged", 
+                                root=str(root), name=name, index=index)
+                    
+                    # 只有真正变化时才推送
+                    if actual_changed:
+                        self._enqueue_sync_local_to_repo_and_push()
+                        log("watch_trigger_push: actual_changed=True")
+                    else:
+                        log("watch_skip_push: actual_changed=False")
             log("watch_debounce_stop")
+        
         threading.Thread(target=_debounce_loop, name="WatchDebounce", daemon=True).start()
 
