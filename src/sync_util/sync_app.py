@@ -300,7 +300,6 @@ class SyncApp:
         """
         try:
             config_path = get_config_path()
-            config_dir = config_path.parent
             
             def _config_changed_callback(root: str, created: list, modified: list, deleted: list):
                 # 检查是否是 config.ini 文件变化
@@ -314,7 +313,7 @@ class SyncApp:
                     self._restart_on_config_change()
             
             self._config_watcher = create_watcher(
-                paths=[config_dir],
+                paths=[config_path],
                 callback=_config_changed_callback,
                 interval_ms=2000  # 2秒检查一次配置文件
             )

@@ -21,11 +21,17 @@ def safe_stat(p: Path) -> Optional[SnapshotEntry]:
 def build_snapshot(root: Path) -> Dict[str, SnapshotEntry]:
     """
     递归构建目录快照（文件路径 -> (mtime_ns, size)）
+    支持传入目录或单个文件路径
     """
     snap: Dict[str, SnapshotEntry] = {}
     if not root.exists():
         return snap
-    # 遍历所有文件
+    if root.is_file():
+        se = safe_stat(root)
+        if se is not None:
+            snap[root.resolve().as_posix()] = se
+        return snap
+    # 遍历目录下所有文件
     for p in root.rglob("*"):
         if p.is_file():
             se = safe_stat(p)
