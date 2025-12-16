@@ -6,7 +6,7 @@
 
 | 文件路径 | 包含的类/函数 | 职责 |
 |---------|-------------|------|
-| `sync_util/sync_app.py` | **SyncApp** | 同步应用主控制器 |
+| `sync_util/sync_app.py` | **SyncApp** | 同步应用主控制器 + 配置热重载 🔥 |
 | `git_util/git_repo.py` | **GitRepo** | Git 仓库操作封装 |
 | `task_util/task_queue.py` | **TaskQueue** | 任务队列管理 |
 | `watcher_util/watcher.py` | **Watcher** | 文件监控器 |
@@ -36,7 +36,7 @@
 
 | 文件路径 | 包含的函数 |
 |---------|-----------|
-| `config_util/config_manager.py` | `get_git()`, `get_sync()`, `get_backup()`, `get_logging()`, `get_games()`, `get_general()`, `reload_config()` |
+| `config_util/config_manager.py` | `get_git()`, `get_sync()`, `get_backup()`, `get_logging()`, `get_games()`, `get_general()`, `reload_config()`, `get_config_path()` 🔥 |
 | `log_util/log_manager.py` | `log()`, `reload_logger()` |
 
 ## 📦 模块导入速查
@@ -55,7 +55,8 @@ from config_util import (
     get_logging,      # 日志配置
     get_games,        # 游戏列表
     get_general,      # 通用配置
-    reload_config     # 重载配置
+    reload_config,    # 重载配置
+    get_config_path   # 获取配置文件路径 🔥
 )
 ```
 
@@ -141,7 +142,8 @@ app = SyncApp(
     override_remote="https://github.com/user/repo.git",  # 可选
     override_token="ghp_xxx",                            # 可选
     override_username="user",                            # 可选
-    override_branch="main"                               # 可选
+    override_branch="main",                              # 可选
+    enable_config_watch=True                             # 启用配置热重载 🔥
 )
 
 try:
@@ -153,7 +155,11 @@ except KeyboardInterrupt:
 
 ### 访问配置
 ```python
-from config_util import get_git, get_games
+from config_util import get_git, get_games, get_config_path
+
+# 获取配置文件路径 🔥
+config_path = get_config_path()
+print(f"配置文件: {config_path}")
 
 # 获取 Git 配置
 git_cfg = get_git()

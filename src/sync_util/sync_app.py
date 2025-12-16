@@ -11,7 +11,7 @@ import threading
 import time
 
 from log_util import log
-from config_util import get_git, get_backup, get_sync, get_games, get_general
+from config_util import get_git, get_backup, get_sync, get_games, get_general, reload_config, get_config_path
 from git_util import create_git, GitRepo
 from file_util import ensure_dir
 from watcher_util import create_watcher, Watcher
@@ -24,16 +24,46 @@ class SyncApp:
     存档同步应用
     - 负责启动阶段流程、定时器、文件监控与任务队列
     """
-    def __init__(self, override_remote: str | None = None, override_token: str | None = None, override_username: str | None = None, override_branch: str | None = None):
+    def __init__(self, override_remote: str | None = None, override_token: str | None = None, override_username: str | None = None, override_branch: str | None = None, enable_config_watch: bool = True):
+        # 命令行覆盖参数（保存以便重启时使用）
+        self._override_remote = override_remote
+        self._override_token = override_token
+        self._override_username = override_username
+        self._override_branch = override_branch
+        self._enable_config_watch = enable_config_watch
+        
+        # 加载配置
+        self._load_config()
+        
+        # 任务队列（唯一任务只保留最新）
+        self.q_pull: TaskQueue = create_queue("pull")
+        self.q_push: TaskQueue = create_queue("push")
+        self.q_apply: TaskQueue = create_queue("apply")
+        # 游戏存档监控器
+        self.watcher: Watcher | None = None
+        # 配置文件监控器
+        self._config_watcher: Watcher | None = None
+        # 定时器线程
+        self._timer_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        # 重启锁（防止配置文件多次变更导致多次重启）
+        self._restart_lock = threading.Lock()
+        self._restarting = False
+        # 存档文件哈希值缓存（用于判断是否真正变化）
+        self._save_files_hash: Dict[str, str] = {}
+        log("app_init_done")
+    
+    def _load_config(self):
+        """加载或重新加载配置"""
         self.git_cfg = get_git()
-        if override_remote is not None:
-            self.git_cfg["remote"] = override_remote
-        if override_token is not None:
-            self.git_cfg["token"] = override_token
-        if override_username is not None:
-            self.git_cfg["username"] = override_username
-        if override_branch is not None:
-            self.git_cfg["branch"] = override_branch
+        if self._override_remote is not None:
+            self.git_cfg["remote"] = self._override_remote
+        if self._override_token is not None:
+            self.git_cfg["token"] = self._override_token
+        if self._override_username is not None:
+            self.git_cfg["username"] = self._override_username
+        if self._override_branch is not None:
+            self.git_cfg["branch"] = self._override_branch
         self.backup_cfg = get_backup()
         self.sync_cfg = get_sync()
         self.general = get_general()
@@ -47,22 +77,10 @@ class SyncApp:
             token=self.git_cfg.get("token", ""),
             username=self.git_cfg.get("username", ""),
         )
-        # 任务队列（唯一任务只保留最新）
-        self.q_pull: TaskQueue = create_queue("pull")
-        self.q_push: TaskQueue = create_queue("push")
-        self.q_apply: TaskQueue = create_queue("apply")
-        # 监控器
-        self.watcher: Watcher | None = None
-        # 定时器线程
-        self._timer_thread: threading.Thread | None = None
-        self._stop_event = threading.Event()
-        # 存档文件哈希值缓存（用于判断是否真正变化）
-        self._save_files_hash: Dict[str, str] = {}
-        log("app_init_done")
 
     def start(self):
         """
-        启动阶段：备份、拉取、覆盖、推送、清理
+        启动阶段：备份、拉取、覆盖、推送、清理、监控
         """
         log("app_start")
         self._ensure_repository()
@@ -72,6 +90,8 @@ class SyncApp:
         self._cleanup_backups()
         self._start_timer()
         self._start_watcher()
+        if self._enable_config_watch:
+            self._start_config_watcher()
         log("app_started")
 
     def stop(self):
@@ -84,6 +104,8 @@ class SyncApp:
             self._timer_thread.join(timeout=2)
         if self.watcher:
             self.watcher.release()
+        if self._config_watcher:
+            self._config_watcher.release()
         log("app_stopped")
 
     def _ensure_repository(self):
@@ -271,3 +293,86 @@ class SyncApp:
             log("watch_debounce_stop")
         
         threading.Thread(target=_debounce_loop, name="WatchDebounce", daemon=True).start()
+
+    def _start_config_watcher(self):
+        """
+        启动配置文件监控器，当配置文件变化时自动重启应用
+        """
+        try:
+            config_path = get_config_path()
+            config_dir = config_path.parent
+            
+            def _config_changed_callback(root: str, created: list, modified: list, deleted: list):
+                # 检查是否是 config.ini 文件变化
+                config_file_path = config_path.as_posix()
+                all_changes = created + modified + deleted
+                
+                if config_file_path in all_changes:
+                    log("config_file_changed: path={path}", path=config_file_path)
+                    # 延迟一下，避免文件正在写入中
+                    time.sleep(0.5)
+                    self._restart_on_config_change()
+            
+            self._config_watcher = create_watcher(
+                paths=[config_dir],
+                callback=_config_changed_callback,
+                interval_ms=2000  # 2秒检查一次配置文件
+            )
+            self._config_watcher.start()
+            log("config_watcher_started: path={path}", path=str(config_path))
+        except Exception as e:
+            log("config_watcher_start_failed: err={err}", err=str(e))
+    
+    def _restart_on_config_change(self):
+        """
+        当配置文件变化时重启应用
+        """
+        with self._restart_lock:
+            if self._restarting:
+                log("config_reload_skip: already_restarting")
+                return
+            self._restarting = True
+        
+        try:
+            log("config_reload_start")
+            
+            # 1. 停止所有后台任务（但不设置 _stop_event，避免定时器退出）
+            if self._timer_thread:
+                # 定时器会在重启后重新启动，这里不需要join
+                pass
+            
+            if self.watcher:
+                self.watcher.release()
+                self.watcher = None
+            
+            # 2. 重新加载配置
+            reload_config()
+            self._load_config()
+            log("config_reload_done")
+            
+            # 3. 清空哈希缓存（因为可能监控的游戏目录变了）
+            self._save_files_hash.clear()
+            
+            # 4. 重新执行启动流程（不包括配置监控器本身）
+            log("app_restart")
+            self._ensure_repository()
+            self._backup_local_saves()
+            self._enqueue_pull_apply()
+            self._enqueue_sync_local_to_repo_and_push()
+            self._cleanup_backups()
+            
+            # 5. 重启定时器（先停止旧的）
+            if self._timer_thread and self._timer_thread.is_alive():
+                # 定时器线程会自然结束，启动新的
+                pass
+            self._start_timer()
+            
+            # 6. 重启游戏存档监控器
+            self._start_watcher()
+            
+            log("app_restart_done")
+        except Exception as e:
+            log("config_reload_error: err={err}", err=str(e))
+        finally:
+            with self._restart_lock:
+                self._restarting = False

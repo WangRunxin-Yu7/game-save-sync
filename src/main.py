@@ -13,13 +13,15 @@ def main():
     parser.add_argument("--token", type=str, default=None, help="覆盖配置中的 Git 访问令牌")
     parser.add_argument("--username", type=str, default=None, help="覆盖配置中的 Git 用户名")
     parser.add_argument("--branch", type=str, default=None, help="覆盖配置中的 Git 分支名")
+    parser.add_argument("--no-config-watch", action="store_true", help="禁用配置文件热重载（默认启用）")
     args = parser.parse_args()
 
     app = SyncApp(
         override_remote=args.remote,
         override_token=args.token,
         override_username=args.username,
-        override_branch=args.branch
+        override_branch=args.branch,
+        enable_config_watch=not args.no_config_watch
     )
     try:
         app.start()

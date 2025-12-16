@@ -11,9 +11,9 @@ _CONFIG = None
 _LOCK = threading.Lock()
 
 
-def _detect_config_path() -> Path:
+def get_config_path() -> Path:
     """
-    发现配置文件路径：
+    获取配置文件路径（公开函数，供外部调用）
     优先读取项目根目录 `config.ini`，否则回退到 `data/config.ini`
     支持 PyInstaller 打包后的路径查找
     """
@@ -29,6 +29,13 @@ def _detect_config_path() -> Path:
         if p.exists():
             return p
     raise FileNotFoundError("config.ini not found")
+
+
+def _detect_config_path() -> Path:
+    """
+    内部使用的配置路径检测（保持向后兼容）
+    """
+    return get_config_path()
 
 
 def _init():

@@ -11,7 +11,8 @@ from .config_manager import (
     get_backup,
     get_logging,
     get_games,
-    reload_config
+    reload_config,
+    get_config_path
 )
 
 __all__ = [
@@ -24,5 +25,6 @@ __all__ = [
     "get_backup",
     "get_logging",
     "get_games",
-    "reload_config"
+    "reload_config",
+    "get_config_path"
 ]
